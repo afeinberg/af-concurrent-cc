@@ -156,8 +156,10 @@ ConcurrentLinkedQueue_::first() {
     for (;;) {
         Node *h = head_.load();
         Node *t = tail_.load();
+        HazardPtrGuard hp_head(h);
         Node *first = h->get_next();
         if (h == head_.load()) {
+            HazardPtrGuard hp_next(first);
             if (h == t) {
                 if (first == NULL) {
                     return NULL;
