@@ -2,10 +2,13 @@
 #include <cstdlib>
 
 #include "af/concurrent/concurrent_linked_queue_impl.h"
+#include "af/concurrent/hazard_ptr_guard.h"
 
 namespace af {
 
 typedef ConcurrentLinkedQueue_::Node Node;
+
+thread_specific_ptr<vector<Node *> > ConcurrentLinkedQueue_::rlist_;
 
 Node::Node(void *value, Node *next)
         :value_({ value }),
@@ -65,6 +68,7 @@ bool ConcurrentLinkedQueue_::offer(void *item) {
     for (;;) {
         Node *t = tail_.load();
         Node *s = t->get_next();
+        HazardPtrGuard hp(t);
         if (t == tail_.load()) {
             if (s == NULL) {
                 if (t->cas_next(s, n)) {
@@ -83,8 +87,10 @@ ConcurrentLinkedQueue_::peek() {
     for (;;) {
         Node *h = head_.load();
         Node *t = tail_.load();
+        HazardPtrGuard hp_head(h);
         Node *first = h->get_next();
         if (h == head_.load()) {
+            HazardPtrGuard hp_next(first);
             if (h == t) {
                 if (first == NULL) {
                     return NULL;
@@ -108,8 +114,10 @@ ConcurrentLinkedQueue_::poll() {
     for (;;) {
         Node *h = head_.load();
         Node *t = tail_.load();
+        HazardPtrGuard hp_head(h);
         Node *first = h->get_next();
         if (h == head_.load()) {
+            HazardPtrGuard hp_next(first);
             if (h == t) {
                 if (first == NULL) {
                     return NULL;
@@ -118,6 +126,7 @@ ConcurrentLinkedQueue_::poll() {
                 }
             } else if (cas_head(h, first)) {
                 void *item = first->get_item();
+                retire(h, alloc_);
                 if (item != NULL) {
                     first->set_item(NULL);
                     return item;
@@ -173,5 +182,46 @@ bool ConcurrentLinkedQueue_::cas_tail(Node *cmp, Node *val) {
 bool ConcurrentLinkedQueue_::cas_head(Node *cmp, Node *val) {
     return head_.compare_exchange_strong(cmp, val);
 }
-    
+
+void ConcurrentLinkedQueue_::retire(Node *old,
+                                    const shared_ptr<NodeAllocStrategy> alloc) {
+    if (rlist_.get() == NULL) {
+        rlist_.reset(new vector<Node *>);
+    }
+    rlist_->push_back(old);
+    if (rlist_->size() >= kRetire) {
+        scan(HazardPtrRec::head(), alloc);
+    }
+}
+
+void ConcurrentLinkedQueue_::scan(HazardPtrRec *head,
+                                  const shared_ptr<NodeAllocStrategy> alloc) {
+    vector<void *> hp;
+    // Scan the hazard pointer list, collecting all non-NULL ptrs
+    while (head != NULL) {
+        void *p = head->get_hazard();
+        if (p != NULL) {
+            hp.push_back(p);
+        }
+        head = head->get_next();
+    }
+
+    std::sort(hp.begin(), hp.end(), std::less<void *>());
+    std::vector<Node *>::iterator it = rlist_->begin();
+    while (it != rlist_->end()) {
+        if (!std::binary_search(hp.begin(),
+                                hp.end(),
+                                *it)) {
+            // Found one that can safely be deleted
+            alloc->deallocate(*it, 1);
+            if (&*it != &(rlist_->back())) {
+                *it = rlist_->back();
+            }
+            rlist_->pop_back();
+        } else {
+            ++it;
+        }
+    }
+}
+
 } // namespace

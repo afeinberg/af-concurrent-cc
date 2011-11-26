@@ -7,7 +7,9 @@
 #include <memory>
 
 #include <boost/noncopyable.hpp>
+#include <boost/thread/tss.hpp>
 
+#include "af/concurrent/hazard_ptr_rec.h"
 #include "af/concurrent/concurrent_queue.h"
 #include "af/alloc/alloc.h"
 
@@ -16,7 +18,10 @@ namespace af {
 using std::atomic;
 using std::shared_ptr;
 using std::unique_ptr;
+using std::vector;
+
 using boost::noncopyable;
+using boost::thread_specific_ptr;
 
 typedef AllocationStrategy<void> NodeAllocStrategy;
 
@@ -24,7 +29,6 @@ class ConcurrentLinkedQueue_ : private noncopyable, public ConcurrentQueue<void 
     
   public:
     
-
     explicit ConcurrentLinkedQueue_(const shared_ptr<NodeAllocStrategy> &alloc);
     virtual ~ConcurrentLinkedQueue_();
     
@@ -62,6 +66,15 @@ private:
     const shared_ptr<NodeAllocStrategy> alloc_;
     atomic<Node *> head_;
     atomic<Node *> tail_;
+
+    static void scan(HazardPtrRec *head,
+                     const shared_ptr<NodeAllocStrategy> alloc);
+    static void retire(Node *old,
+                       const shared_ptr<NodeAllocStrategy> alloc);
+    
+    static thread_specific_ptr<vector<Node *> > rlist_;
+    
+    static const size_t kRetire = 3;
 };
 
 }
